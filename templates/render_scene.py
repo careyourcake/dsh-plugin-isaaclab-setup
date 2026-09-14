@@ -19,7 +19,7 @@ parser = argparse.ArgumentParser()
 AppLauncher.add_app_launcher_args(parser)
 parser.add_argument("--terrain", type=str, default="gap", choices=["gap", "stairs", "wave"])
 parser.add_argument("--out", type=str, default="/tmp/scene")
-parser.add_argument("--steps", type=int, default=170)
+parser.add_argument("--steps", type=int, default=300)
 args = parser.parse_args()
 app = AppLauncher(args).app
 
@@ -44,8 +44,8 @@ from isaaclab_assets.robots.unitree import UNITREE_GO2_CFG
 
 ZOO = {
     "gap": MeshGapTerrainCfg(proportion=1.0, gap_width_range=(1.5, 1.5), platform_width=4.0),
-    "stairs": MeshPyramidStairsTerrainCfg(proportion=1.0, step_height_range=(0.08, 0.14),
-                                          step_width=0.3, platform_width=2.0, border_width=1.0, holes=False),
+    "stairs": MeshPyramidStairsTerrainCfg(proportion=1.0, step_height_range=(0.14, 0.22),
+                                          step_width=0.35, platform_width=1.5, border_width=1.0, holes=False),
     "wave": HfWaveTerrainCfg(proportion=1.0, amplitude_range=(0.05, 0.15), num_waves=4, border_width=0.25),
 }
 
@@ -61,10 +61,10 @@ class SceneCfg(InteractiveSceneCfg):
         ),
         visual_material=None, debug_vis=False,
     )
-    dome_light = AssetBaseCfg(prim_path="/World/Light", spawn=sim_utils.DomeLightCfg(intensity=1.0))
+    dome_light = AssetBaseCfg(prim_path="/World/Light", spawn=sim_utils.DomeLightCfg(intensity=0.75))
     sun = AssetBaseCfg(
         prim_path="/World/Sun",
-        spawn=sim_utils.DistantLightCfg(intensity=8.0, color=(1.0, 0.97, 0.92), angle=1.5),
+        spawn=sim_utils.DistantLightCfg(intensity=14.0, color=(1.0, 0.97, 0.92), angle=1.5),
         init_state=AssetBaseCfg.InitialStateCfg(rot=(0.87, 0.0, 0.5, 0.0)),
     )
     floor = AssetBaseCfg(
@@ -129,15 +129,15 @@ def main():
     z_stand = float(scene["robot"].data.root_pos_w[0, 2]) + 0.06
     print(f"settled standing height z={z_stand:.3f}", flush=True)
 
-    # 相机相对实际站高来定（地形平台多高，相机就抬多高，否则机器狗跑出画面）
+    # 相机：拉远+抬高，能看到整片地形（否则只能看到机器狗脚下那块平地）
     scene["camera"].set_world_poses_from_view(
-        torch.tensor([[0.1, 2.2, z_stand + 1.25]], device=args.device),
-        torch.tensor([[0.1, -0.3, z_stand - 0.25]], device=args.device))
+        torch.tensor([[3.4, 3.4, z_stand + 0.15]], device=args.device),
+        torch.tensor([[0.0, 0.0, z_stand - 0.75]], device=args.device))
     scene["depth_cam"].set_world_poses_from_view(
-        torch.tensor([[0.2, 1.2, z_stand + 2.9]], device=args.device),
-        torch.tensor([[0.2, -0.4, z_stand - 0.3]], device=args.device))
+        torch.tensor([[0.2, 1.2, z_stand + 3.4]], device=args.device),
+        torch.tensor([[0.2, -0.4, z_stand - 0.4]], device=args.device))
 
-    freq, speed = 1.6, 1.1
+    freq, speed = 1.6, 0.85
     x_base, frames = -0.35, []
     for f in range(args.steps):
         t = f * dt
@@ -153,12 +153,18 @@ def main():
         scene.write_data_to_sim()
         sim.step()
         scene.update(dt)
-        if f % 10 == 0:
+        if f % 6 == 0:
             scene["camera"].update(dt=0.0)
             scene["depth_cam"].update(dt=0.0)
             rgb = scene["camera"].data.output["rgb"][0, ..., :3].cpu().numpy()
             depth = scene["depth_cam"].data.output["distance_to_image_plane"][0].cpu().numpy()
             frames.append(composite(rgb, depth))
+    # 同时输出 MP4（imageio 走 ffmpeg 后端）与 GIF
+    try:
+        imageio.mimsave(f"{args.out}_walk.mp4", frames, fps=25, quality=9)
+        print(f"saved {args.out}_walk.mp4 ({len(frames)} frames)", flush=True)
+    except Exception as e:
+        print(f"mp4 failed: {e}", flush=True)
     imageio.mimsave(f"{args.out}_walk.gif", frames, fps=4)
     print(f"saved {args.out}_walk.gif ({len(frames)} frames)", flush=True)
     os._exit(0)

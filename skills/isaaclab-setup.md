@@ -181,6 +181,10 @@ plt.imshow(hf.T, origin="lower", cmap="terrain"); plt.colorbar(label="height (m)
 7. **摆位索引坑**：`default_joint_pos` 是 `(num_envs, num_joints)`，改关节要写 `target[0, idx]`，不是 `target[idx]`。
 8. **步态动画**：对角小跑（FL/RR 同相、FR/RL 反相），大腿 `default + 0.5*sin(2πft+phase)`、小腿 `default - 0.35*max(0,cos(...))`，base 沿 +x 平移。
 9. 多机位一次渲染对比（`cams` 列表循环），挑最好的角度，别一次只试一个。
+10. **输出 MP4**：服务器一般有 ffmpeg，`imageio.mimsave("out.mp4", frames, fps=25)` 自动走 ffmpeg 后端；GIF 体积大且掉帧，优先 MP4。
+11. **地形特征（台阶/坡）看不见怎么办**——两个反直觉要点：
+    - **相机别太高**：俯角太陡只看到踏面，台阶看着像平地；要用**低角度**看台阶**立面**（eye 只比目标高 0.15~0.5m）。
+    - **环境光别太强**：`DomeLight` 会把台阶阴影冲平；用**弱环境光(0.25~0.75) + 强平行光(8~14) + 大台阶(step_height 0.14~0.22)**，台阶立面才有明暗对比。
 
 ### 4.5 验证清单（生成完必做）
 
