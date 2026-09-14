@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""3D 场景渲染模板：地形 + Go2 + 第三视角 RGB + 右下角 Depth Image 内嵌 + 步态动画 → GIF。
+"""论文级 3D 渲染模板：RTX 光追 + PBR 材质 + 地形 + Go2 + 深度内嵌 + MP4/GIF。
 
-用法（headless 服务器）：
-  python render_scene.py --headless --enable_cameras --terrain gap --steps 170
+用法（headless GPU 服务器）：
+  python render_scene.py --headless --enable_cameras --terrain stairs --steps 300
 
-关键点（对照 skill 2.4）：
-  * Camera 必须放进 InteractiveScene（scene["camera"]）；standalone 会挂
-  * DomeLightCfg(intensity=1.0) 才正常；2000+ 反而全黑
-  * DistantLightCfg 做主光源才有方向阴影
-  * 深度相机输出 (H,W,1)，合成前必须 reshape
-  * 机器人 PD 保持：set_joint_position_target(default)；索引 target[0, idx]
+渲染管线要点（对照 skill 4.4）：
+  * RTX 光追：SimulationCfg(render=RenderCfg(...)) 开 GI/反射/软阴影/AO/DLAA
+  * PBR 材质：地形 visual_material=PreviewSurfaceCfg(...)，别留默认灰
+  * 1080p + MP4（imageio 走 ffmpeg）
+  * Camera 走 InteractiveScene；DomeLight intensity=1.0 附近；低角度看台阶立面
+  * 机器人 z 不写死：先 settle 读实际站高，相机随站高
 """
 import argparse
 
@@ -17,9 +17,10 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser()
 AppLauncher.add_app_launcher_args(parser)
-parser.add_argument("--terrain", type=str, default="gap", choices=["gap", "stairs", "wave"])
+parser.add_argument("--terrain", type=str, default="stairs", choices=["gap", "stairs", "wave"])
 parser.add_argument("--out", type=str, default="/tmp/scene")
 parser.add_argument("--steps", type=int, default=300)
+parser.add_argument("--res", type=str, default="1920x1080", help="主视角分辨率 WxH")
 args = parser.parse_args()
 app = AppLauncher(args).app
 
@@ -35,6 +36,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.sensors import CameraCfg
+from isaaclab.sim import RenderCfg, SimulationCfg
 from isaaclab.terrains import (
     TerrainImporterCfg, TerrainGeneratorCfg,
     MeshGapTerrainCfg, MeshPyramidStairsTerrainCfg, HfWaveTerrainCfg,
@@ -48,6 +50,10 @@ ZOO = {
                                           step_width=0.35, platform_width=1.5, border_width=1.0, holes=False),
     "wave": HfWaveTerrainCfg(proportion=1.0, amplitude_range=(0.05, 0.15), num_waves=4, border_width=0.25),
 }
+W, H = (int(x) for x in args.res.lower().split("x"))
+
+# PBR 材质（混凝土感，别用默认灰）
+TERRAIN_MAT = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.34, 0.33, 0.31), roughness=0.8, metallic=0.0)
 
 
 @configclass
@@ -59,25 +65,33 @@ class SceneCfg(InteractiveSceneCfg):
             horizontal_scale=0.1, vertical_scale=0.005, slope_threshold=0.75,
             sub_terrains={args.terrain: ZOO[args.terrain]},
         ),
-        visual_material=None, debug_vis=False,
+        visual_material=TERRAIN_MAT,   # ← PBR 材质
+        debug_vis=False,
     )
-    dome_light = AssetBaseCfg(prim_path="/World/Light", spawn=sim_utils.DomeLightCfg(intensity=0.75))
+    dome_light = AssetBaseCfg(prim_path="/World/Light", spawn=sim_utils.DomeLightCfg(intensity=1.0))
+    # 主光（太阳）——出方向阴影
     sun = AssetBaseCfg(
         prim_path="/World/Sun",
-        spawn=sim_utils.DistantLightCfg(intensity=14.0, color=(1.0, 0.97, 0.92), angle=1.5),
+        spawn=sim_utils.DistantLightCfg(intensity=2.0, color=(1.0, 0.97, 0.93), angle=2.0),
         init_state=AssetBaseCfg.InitialStateCfg(rot=(0.87, 0.0, 0.5, 0.0)),
+    )
+    # 补光（天光，冷色，压低反差更像影棚）
+    fill = AssetBaseCfg(
+        prim_path="/World/Fill",
+        spawn=sim_utils.DistantLightCfg(intensity=0.6, color=(0.95, 0.95, 1.0), angle=5.0),
+        init_state=AssetBaseCfg.InitialStateCfg(rot=(0.95, 0.25, -0.2, 0.0)),
     )
     floor = AssetBaseCfg(
         prim_path="/World/Floor",
         spawn=sim_utils.CuboidCfg(size=(30.0, 30.0, 0.1),
-                                  visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.06, 0.06, 0.07))),
+                                  visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.05, 0.05, 0.06))),
         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -2.0)),
     )
     robot: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
     camera = CameraCfg(
-        prim_path="{ENV_REGEX_NS}/main_cam", update_period=0, height=720, width=1280,
+        prim_path="{ENV_REGEX_NS}/main_cam", update_period=0, height=H, width=W,
         data_types=["rgb"],
-        spawn=sim_utils.PinholeCameraCfg(focal_length=24.0, focus_distance=400.0,
+        spawn=sim_utils.PinholeCameraCfg(focal_length=28.0, focus_distance=400.0,
                                          horizontal_aperture=20.955, clipping_range=(0.1, 1.0e5)),
         offset=CameraCfg.OffsetCfg(pos=(0.0, 0.0, 0.0), rot=(1.0, 0.0, 0.0, 0.0), convention="world"),
     )
@@ -90,24 +104,61 @@ class SceneCfg(InteractiveSceneCfg):
     )
 
 
-def composite(rgb, depth):
+def composite(rgb, depth, inset=340):
     d = np.clip(depth.reshape(depth.shape[0], depth.shape[1]), 0.0, 8.0) / 8.0
     depth_rgb = np.stack([(255 * (1.0 - d)).astype(np.uint8)] * 3, axis=-1)
     main = Image.fromarray((rgb * 255).astype(np.uint8))
-    inset = Image.fromarray(depth_rgb).resize((300, 300))
-    W, H = main.size
-    x0, y0 = W - 320, H - 350
+    im = Image.fromarray(depth_rgb).resize((inset, inset))
+    w, h = main.size
+    x0, y0 = w - inset - 30, h - inset - 40
     draw = ImageDraw.Draw(main)
-    draw.rectangle([x0, y0, x0 + 320, y0 + 350], fill=(255, 255, 255))
-    main.paste(inset, (x0 + 10, y0 + 40))
-    draw.text((x0 + 10, y0 + 12), "Depth Image", fill=(0, 0, 0))
+    draw.rectangle([x0 - 10, y0 - 34, x0 + inset + 10, y0 + inset + 10], fill=(255, 255, 255))
+    main.paste(im, (x0, y0))
+    draw.text((x0, y0 - 26), "Depth Image", fill=(0, 0, 0))
     return np.asarray(main)
 
 
 def main():
-    sim = sim_utils.SimulationContext(sim_utils.SimulationCfg(dt=0.005, device=args.device))
+    # RTX 光追管线：GI + 反射 + 软阴影 + AO + DLAA 抗锯齿
+    sim_cfg = SimulationCfg(
+        dt=0.005, device=args.device,
+        render=RenderCfg(
+            enable_reflections=True,
+            enable_global_illumination=True,
+            enable_shadows=True,
+            enable_translucency=True,
+            enable_ambient_occlusion=True,
+            enable_direct_lighting=True,
+            enable_dl_denoiser=True,
+            antialiasing_mode="DLAA",
+            samples_per_pixel=4,
+        ),
+    )
+    sim = sim_utils.SimulationContext(sim_cfg)
     scene = InteractiveScene(SceneCfg(num_envs=1, env_spacing=2.0))
     sim.reset()
+    # 地形材质：TerrainImporterCfg.visual_material 不一定生效 —— 用标准 USD 方式直接绑定
+    try:
+        import omni.usd
+        from pxr import UsdShade, Sdf
+        stage = omni.usd.get_context().get_stage()
+        mat_path = "/World/Looks/TerrainMat"
+        mat = UsdShade.Material.Define(stage, mat_path)
+        sh = UsdShade.Shader.Define(stage, mat_path + "/PreviewSurface")
+        sh.CreateIdAttr("UsdPreviewSurface")
+        sh.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set((0.38, 0.36, 0.34))
+        sh.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.8)
+        sh.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+        mat.CreateSurfaceOutput().ConnectToSource(sh.ConnectableAPI(), "surface")
+        prim = stage.GetPrimAtPath("/World/ground")
+        if prim.IsValid():
+            UsdShade.MaterialBindingAPI.Apply(prim).Bind(mat)
+            print("bound terrain material via USD MaterialBindingAPI", flush=True)
+        else:
+            print("terrain prim /World/ground not found", flush=True)
+    except Exception as e:
+        print(f"usd material bind failed: {e}", flush=True)
+    print(f"render: {W}x{H} RTX GI+reflections+AO+DLAA, terrain PBR material applied", flush=True)
 
     names = list(scene["robot"].joint_names)
     idx = {n: i for i, n in enumerate(names)}
@@ -117,8 +168,7 @@ def main():
     phase = {"FL": 0.0, "RR": 0.0, "FR": math.pi, "RL": math.pi}
 
     dt = 0.005
-    # 关键：机器狗 z 不能写死——不同地形平台高度不同（楼梯平台高、gap 平台为 0）。
-    # 先高抛到地面上方，PD 保持站姿让它自然落到地形上，再读实际站立高度。
+    # 机器狗 z 不能写死：高抛后 PD 保持，让它落到地形上，读实际站高
     scene["robot"].write_root_pose_to_sim(
         torch.tensor([[0.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0]], device=args.device))
     for _ in range(400):
@@ -129,10 +179,10 @@ def main():
     z_stand = float(scene["robot"].data.root_pos_w[0, 2]) + 0.06
     print(f"settled standing height z={z_stand:.3f}", flush=True)
 
-    # 相机：拉远+抬高，能看到整片地形（否则只能看到机器狗脚下那块平地）
+    # 低角度看台阶立面（相机只比目标高一点点）
     scene["camera"].set_world_poses_from_view(
-        torch.tensor([[3.4, 3.4, z_stand + 0.15]], device=args.device),
-        torch.tensor([[0.0, 0.0, z_stand - 0.75]], device=args.device))
+        torch.tensor([[3.4, 3.4, z_stand + 0.25]], device=args.device),
+        torch.tensor([[0.0, 0.0, z_stand - 0.85]], device=args.device))
     scene["depth_cam"].set_world_poses_from_view(
         torch.tensor([[0.2, 1.2, z_stand + 3.4]], device=args.device),
         torch.tensor([[0.2, -0.4, z_stand - 0.4]], device=args.device))
@@ -159,14 +209,15 @@ def main():
             rgb = scene["camera"].data.output["rgb"][0, ..., :3].cpu().numpy()
             depth = scene["depth_cam"].data.output["distance_to_image_plane"][0].cpu().numpy()
             frames.append(composite(rgb, depth))
-    # 同时输出 MP4（imageio 走 ffmpeg 后端）与 GIF
+
     try:
         imageio.mimsave(f"{args.out}_walk.mp4", frames, fps=25, quality=9)
         print(f"saved {args.out}_walk.mp4 ({len(frames)} frames)", flush=True)
     except Exception as e:
         print(f"mp4 failed: {e}", flush=True)
     imageio.mimsave(f"{args.out}_walk.gif", frames, fps=4)
-    print(f"saved {args.out}_walk.gif ({len(frames)} frames)", flush=True)
+    imageio.imwrite(f"{args.out}_frame.png", frames[len(frames) // 2])
+    print(f"saved gif+frame ({len(frames)} frames)", flush=True)
     os._exit(0)
 
 

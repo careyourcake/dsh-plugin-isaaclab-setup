@@ -186,6 +186,53 @@ plt.imshow(hf.T, origin="lower", cmap="terrain"); plt.colorbar(label="height (m)
     - **相机别太高**：俯角太陡只看到踏面，台阶看着像平地；要用**低角度**看台阶**立面**（eye 只比目标高 0.15~0.5m）。
     - **环境光别太强**：`DomeLight` 会把台阶阴影冲平；用**弱环境光(0.25~0.75) + 强平行光(8~14) + 大台阶(step_height 0.14~0.22)**，台阶立面才有明暗对比。
 
+### 4.4.1 论文级渲染管线（RTX 光追 + PBR 材质）
+
+**默认渲染是"能看"级，论文级要显式开 RTX + 上材质：**
+
+```python
+from isaaclab.sim import RenderCfg, SimulationCfg
+sim = sim_utils.SimulationContext(SimulationCfg(
+    dt=0.005, device=args.device,
+    render=RenderCfg(
+        enable_reflections=True,          # 反射
+        enable_global_illumination=True,  # 全局光照（环境光遮蔽的来源）
+        enable_shadows=True,              # 软阴影
+        enable_translucency=True,         # 半透
+        enable_ambient_occlusion=True,    # AO
+        enable_direct_lighting=True,
+        enable_dl_denoiser=True,          # 降噪
+        antialiasing_mode="DLAA",         # 抗锯齿（或 TAA/DLSS）
+        samples_per_pixel=4,              # 采样数，越高越干净越慢
+    ),
+))
+```
+
+**PBR 材质坑**：给 `TerrainImporterCfg(visual_material=PreviewSurfaceCfg(...))` **不一定生效**（实测地形仍是默认白）。可靠做法是 `sim.reset()` 后**用 USD 直接绑材质**：
+
+```python
+import omni.usd
+from pxr import UsdShade, Sdf
+stage = omni.usd.get_context().get_stage()
+mat = UsdShade.Material.Define(stage, "/World/Looks/TerrainMat")
+sh = UsdShade.Shader.Define(stage, "/World/Looks/TerrainMat/PreviewSurface")
+sh.CreateIdAttr("UsdPreviewSurface")
+sh.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set((0.38, 0.36, 0.34))
+sh.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.8)
+sh.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+mat.CreateSurfaceOutput().ConnectToSource(sh.ConnectableAPI(), "surface")
+UsdShade.MaterialBindingAPI.Apply(stage.GetPrimAtPath("/World/ground")).Bind(mat)
+```
+
+> ⚠️ 实测警告：开了 RTX 后，**灯光 intensity 与材质 diffuse 对这个场景的最终亮度影响很小**（图像亮度几乎不变）——可能与本地的 tone-mapping / render product 配置有关。别只靠调 intensity 求曝光，优先用 **RTX 的 `/rtx/post/` 曝光设置**或换 `MdlFileCfg` 的 Nucleus 真实材质。
+
+### 4.4.2 标准离线渲染工作流（顶会论文的做法）
+
+1. **训练**：`scripts/reinforcement_learning/rsl_rl/train.py --task <T> --headless` 训 policy。
+2. **官方录制**：`play.py --task <T> --video --video_length 200 --headless`（内部走 `gym.wrappers.RecordVideo`，`render_mode="rgb_array"`，输出到 `logs/.../videos/play`）。
+3. **（更硬核）存轨迹 → 外部精修**：把每步的关节角/位姿存成 json → 导入 Blender(Cycles)/UE5 离线渲染。
+4. 本文模板 `render_scene.py` 走的是「自建 Camera + RTX + 深度内嵌」路线，适合要**深度内嵌**这种自定义画面；纯标准录制用 `play.py --video` 更省事。
+
 ### 4.5 验证清单（生成完必做）
 
 1. 地形：heightfield 先 matplotlib 可视化，确认几何对、z 范围合理（mesh 地形看解析式高度图）。
