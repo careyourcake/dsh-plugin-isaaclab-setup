@@ -381,7 +381,36 @@ scene["camera"].data.output["rgb"]                          # (N, H, W, 4)
 | DirectRLEnv 里 prim path 报 `is not global` | 用了 `{ENV_REGEX_NS}`（ManagerBased 占位符）；DirectRLEnv 要用 `/World/envs/env_.*/Robot`（见 2.2/4.3） |
 | 渲染时机器狗埋进地形/跑出画面 | base z 写死了；先 settle 读实际站高，相机也按站高定（见 4.4） |
 
-## 7. 一句话流程
+## 7. 远程可视化（WebRTC 推流：Mac/笔记本看服务器仿真）
+
+headless 服务器上没有显示器，要看仿真画面有两条路：
+
+### 7.1 Isaac Sim WebRTC Streaming Client（官方推荐，最高清）
+
+**服务器端**（一条命令）：
+```bash
+cd <IsaacLab>
+PUBLIC_IP=<服务器可达IP> python scripts/reinforcement_learning/rsl_rl/play.py \
+    --task <TASK> --checkpoint <CKPT> --livestream 1 --num_envs 16
+#  --livestream 1 = WebRTC over public（会显式设 publicEndpointAddress=$PUBLIC_IP + port=49100）
+#  --livestream 2 = private network（自动探测 IP，跨网段可能探测错，优先用 1）
+```
+`PUBLIC_IP` 走 `AppLauncher._resolve_livestream_settings()`，只有 `livestream=1` 会用它生成 `--/app/livestream/publicEndpointAddress`。**服务器有多网卡时要显式指定**，否则客户端可能连错地址。
+
+**客户端**（Mac）：下载 `isaacsim-webrtc-streaming-client-<ver>-macos-arm64.dmg`（[下载页](https://docs.isaacsim.omniverse.nvidia.com/5.0.0/installation/download.html)），拖进 `/Applications`，`xattr -dr com.apple.quarantine` 去隔离，打开后**把 127.0.0.1 改成服务器 IP**，点 Connect。
+
+**端口**：`TCP 49100`（信令，`ss -tln` 能看到）+ `UDP 47998`（媒体，**连接时才开**，不要以为没监听就是坏）。
+
+**坑**：
+- headless 服务器**不能**用浏览器打开 `http://<ip>:49100/`（返回 501，那是 WebRTC 信令不是 HTTP 文件服务）。
+- 跨网段/防火墙时 UDP 47998 可能被挡 → 客户端连上但黑屏，需在防火墙上放行。
+- AppleScript 自动点击客户端需要「辅助功能」权限，默认没有，得手动点 Connect。
+
+### 7.2 无头渲染成 MP4（不需要实时看）
+
+见 4.4 / 3.4：`play.py --video` 或自建 Camera 渲染，把 MP4 拉回本地看，适合录论文视频。
+
+## 8. 一句话流程
 
 `查 GPU 架构 → 装 Isaac Sim 5.x + isaaclab 0.47.2 + rsl-rl-lib 3.0.1 → AppLauncher 先行 → 环境生成(需求→环境走 4.6 七步：选地形 4.2 → 配参 → heightmap 验证 4.1 → 复制 env 模板 4.3 → 跑通验证 4.5 → 渲染确认 4.4) → 训练 3 → 运维 5`。
 
