@@ -1,0 +1,11 @@
+# dsh-plugin-isaaclab-setup bundle patch.
+#
+# This bundle inserts ONE host row: the function plugin in this same package.
+# `dsh plugin add <pkg>` reconciles a dependency that declares `dsh.bundle`
+# into the profile's layer stack, so installing this package activates the row
+# automatically. The row's `name` is this package's own name, so the Loader
+# imports lib/index.js and registers the bundled skill provider on ctx.skills.
+
+- insert:
+    - id: isaaclab-setup
+      name: 'dsh-plugin-isaaclab-setup'
