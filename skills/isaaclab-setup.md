@@ -118,6 +118,8 @@ hf = hf_terrains.pyramid_stairs_terrain.__wrapped__(difficulty=1.0, cfg=cfg) * c
 plt.imshow(hf.T, origin="lower", cmap="terrain"); plt.colorbar(label="height (m)"); plt.savefig("stairs.png")
 ```
 
+> **mesh 地形（gap / box / pit / rails / 间隙/箱/坑/轨道）没有高度场数组**：`mesh_terrains.gap_terrain(difficulty, cfg)` 直接返回 `(meshes, origin)`（trimesh 列表）。headless 可视化用**解析式高度图**（按几何把「间隙」格点置 NaN，见 `MeshGapTerrainCfg`：需 `gap_width_range` + `platform_width`），或用 trimesh ray casting 光栅化。`.__wrapped__` 只对 height_field 有效。
+
 ### 4.2 可生成地形清单
 
 | 类别 | 类名 | 说明 |
