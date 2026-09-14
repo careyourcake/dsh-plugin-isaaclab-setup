@@ -21,6 +21,9 @@ parser.add_argument("--terrain", type=str, default="stairs", choices=["gap", "st
 parser.add_argument("--out", type=str, default="/tmp/scene")
 parser.add_argument("--steps", type=int, default=300)
 parser.add_argument("--res", type=str, default="1920x1080", help="主视角分辨率 WxH")
+parser.add_argument("--shot", type=str, default="auto",
+                    choices=["auto", "behind", "left", "back_diag", "front_3q"],
+                    help="跟拍机位；auto = 按地形自动选（窄道 behind / 跳跃 left / 坡道 back_diag）")
 args = parser.parse_args()
 app = AppLauncher(args).app
 
@@ -50,6 +53,18 @@ ZOO = {
                                           step_width=0.35, platform_width=1.5, border_width=1.0, holes=False),
     "wave": HfWaveTerrainCfg(proportion=1.0, amplitude_range=(0.05, 0.15), num_waves=4, border_width=0.25),
 }
+
+# ---- 任务自适应跟拍机位（相对机器狗本体系，机器人转相机跟着转）----
+# 论文视频惯例：窄道跟正后方、跳跃跟正左、上下坡跟斜后方、展示用斜前方
+SHOTS = {
+    "behind":    ((-2.6, 0.0, 0.95), (0.9, 0.0, -0.35)),    # 正后方（窄道/直行）
+    "left":      ((0.0, 2.6, 0.85), (0.0, 0.0, -0.35)),    # 正左（跳跃/侧向动作）
+    "back_diag": ((-2.0, 1.7, 0.95), (0.6, 0.0, -0.35)),   # 斜后方（上下坡/楼梯）
+    "front_3q":  ((2.0, 1.7, 0.95), (-0.5, 0.0, -0.35)),   # 斜前方（展示/迎面）
+}
+# 地形 → 默认机位（可被 --shot 覆盖）
+TERRAIN_SHOT = {"gap": "left", "stairs": "back_diag", "wave": "back_diag"}
+
 W, H = (int(x) for x in args.res.lower().split("x"))
 
 # PBR 材质（混凝土感，别用默认灰）
@@ -118,6 +133,22 @@ def composite(rgb, depth, inset=340):
     return np.asarray(main)
 
 
+def cam_follow(scene, robot_pos, yaw, shot, device):
+    """让相机相对机器狗本体系跟拍：机器人转，相机跟着转（任务自适应机位）。"""
+    off, look = SHOTS[shot]
+    c, s = math.cos(yaw), math.sin(yaw)
+
+    def rot(v):
+        return (c * v[0] - s * v[1], s * v[0] + c * v[1])
+
+    px, py = rot(off)
+    lx, ly = rot(look)
+    rx, ry, rz = float(robot_pos[0]), float(robot_pos[1]), float(robot_pos[2])
+    eye = torch.tensor([[rx + px, ry + py, rz + off[2]]], device=device, dtype=torch.float32)
+    tgt = torch.tensor([[rx + lx, ry + ly, rz + look[2]]], device=device, dtype=torch.float32)
+    scene["camera"].set_world_poses_from_view(eye, tgt)
+
+
 def main():
     # RTX 光追管线：GI + 反射 + 软阴影 + AO + DLAA 抗锯齿
     sim_cfg = SimulationCfg(
@@ -179,10 +210,10 @@ def main():
     z_stand = float(scene["robot"].data.root_pos_w[0, 2]) + 0.06
     print(f"settled standing height z={z_stand:.3f}", flush=True)
 
-    # 低角度看台阶立面（相机只比目标高一点点）
-    scene["camera"].set_world_poses_from_view(
-        torch.tensor([[3.4, 3.4, z_stand + 0.25]], device=args.device),
-        torch.tensor([[0.0, 0.0, z_stand - 0.85]], device=args.device))
+    # 任务自适应跟拍机位
+    shot = TERRAIN_SHOT.get(args.terrain, "back_diag") if args.shot == "auto" else args.shot
+    print(f"camera shot = {shot} (terrain={args.terrain})", flush=True)
+    # 深度相机：俯视整片地形（展示平台 + 间隙/台阶深度）
     scene["depth_cam"].set_world_poses_from_view(
         torch.tensor([[0.2, 1.2, z_stand + 3.4]], device=args.device),
         torch.tensor([[0.2, -0.4, z_stand - 0.4]], device=args.device))
@@ -204,6 +235,12 @@ def main():
         sim.step()
         scene.update(dt)
         if f % 6 == 0:
+            # 相机跟拍：按机器狗当前位置 + 本体系机位偏移重定位
+            rp = scene["robot"].data.root_pos_w[0].cpu().numpy()
+            cam_follow(scene, rp, yaw=0.0, shot=shot, device=args.device)
+            for _ in range(2):
+                sim.step()
+            scene.update(dt)
             scene["camera"].update(dt=0.0)
             scene["depth_cam"].update(dt=0.0)
             rgb = scene["camera"].data.output["rgb"][0, ..., :3].cpu().numpy()

@@ -226,6 +226,29 @@ UsdShade.MaterialBindingAPI.Apply(stage.GetPrimAtPath("/World/ground")).Bind(mat
 
 > ⚠️ 实测警告：开了 RTX 后，**灯光 intensity 与材质 diffuse 对这个场景的最终亮度影响很小**（图像亮度几乎不变）——可能与本地的 tone-mapping / render product 配置有关。别只靠调 intensity 求曝光，优先用 **RTX 的 `/rtx/post/` 曝光设置**或换 `MdlFileCfg` 的 Nucleus 真实材质。
 
+### 4.4.3 任务自适应跟拍相机（论文视频的关键）
+
+论文视频里相机**跟着机器狗，但机位随任务变**：窄道跟正后方、跳跃跟正左、上下坡跟斜后方、展示用斜前方。
+
+在模板 `render_scene.py` 里已实现（`SHOTS` 预设 + `--shot`）：每帧按机器狗位置算相机位姿：
+
+```python
+def cam_follow(scene, robot_pos, yaw, shot, device):
+    off, look = SHOTS[shot]          # 本体系偏移（相机位 / 注视点）
+    c, s = math.cos(yaw), math.sin(yaw)
+    rot = lambda v: (c*v[0]-s*v[1], s*v[0]+c*v[1])
+    px, py = rot(off); lx, ly = rot(look)
+    rx, ry, rz = map(float, robot_pos[:3])
+    eye = torch.tensor([[rx+px, ry+py, rz+off[2]]], device=device, dtype=torch.float32)
+    tgt = torch.tensor([[rx+lx, ry+ly, rz+look[2]]], device=device, dtype=torch.float32)
+    scene["camera"].set_world_poses_from_view(eye, tgt)
+```
+
+三个必踩的坑：
+1. **张量必须显式 `dtype=torch.float32`**——`robot_pos` 是 numpy，混 Python float 会变 float64，`set_world_poses_from_view` 报 `Found dtype Double but expected Float`。
+2. **注视点要低于机器狗 base**（`look z ≈ -0.35`，不是正的）——否则相机看得太高，狗跑到画面底部、腿被切。
+3. **别每帧调 `set_world_poses_from_view`**（会飘/跑出画面）；在**抓帧时刻**调、并 `sim.step()` 两帧让渲染稳定。
+
 ### 4.4.2 标准离线渲染工作流（顶会论文的做法）
 
 1. **训练**：`scripts/reinforcement_learning/rsl_rl/train.py --task <T> --headless` 训 policy。
