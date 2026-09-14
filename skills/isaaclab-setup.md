@@ -118,6 +118,8 @@ hf = hf_terrains.pyramid_stairs_terrain.__wrapped__(difficulty=1.0, cfg=cfg) * c
 plt.imshow(hf.T, origin="lower", cmap="terrain"); plt.colorbar(label="height (m)"); plt.savefig("stairs.png")
 ```
 
+> **关键坑：heightfield 数组 ≠ 物理碰撞体**。height_field 函数返回的 2D 数组只是**中间产物**——`@height_field_to_mesh` 装饰器会调 `convert_height_field_to_mesh()` 把它转成 `trimesh.Trimesh`（三角网格），**物理引擎里机器人踩的是这个 mesh，不是 heightfield 数组**。转换时用 `slope_threshold` 把超过阈值的陡峭竖直面「掰成斜边」，消除相邻网格高度不连续的「接缝」，否则四足脚尖会卡进网格接缝里。所以送进物理前要检查的是 **mesh（三角面连续、无长竖直面）**，不是数组。
+
 > **mesh 地形（gap / box / pit / rails / 间隙/箱/坑/轨道）没有高度场数组**：`mesh_terrains.gap_terrain(difficulty, cfg)` 直接返回 `(meshes, origin)`（trimesh 列表）。headless 可视化用**解析式高度图**（按几何把「间隙」格点置 NaN，见 `MeshGapTerrainCfg`：需 `gap_width_range` + `platform_width`），或用 trimesh ray casting 光栅化。`.__wrapped__` 只对 height_field 有效。
 
 ### 4.2 可生成地形清单
