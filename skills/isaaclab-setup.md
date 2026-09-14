@@ -64,11 +64,14 @@ from isaaclab.assets import Articulation
 
 `simulation_app.close()` 在 headless 下会**永久卡住**。脚本结尾用 `os._exit(0)` 硬退出。
 
-### 2.4 无头渲染（截图/视频）
+### 2.4 无头渲染（3D 截图/视频）
 
 - headless kit（`isaaclab.python.headless.kit`）**没有 `omni.kit.viewport`**，`capture_viewport_to_file` 会 `ModuleNotFoundError`。
-- 正确做法：用 `isaaclab.sensors.Camera` + `--enable_cameras`，`CameraCfg` 的 spawn 用 `PinholeCameraCfg`，位姿用 `camera.set_world_poses_from_view(eyes, targets)`；取图 `camera.data.output["rgb"]`（H,W,4）→ 丢掉 alpha 用 imageio 存 PNG。
-- 纯几何俯视图可视化（走廊/扫掠体积）可以直接用 matplotlib，不必上 Isaac Sim。
+- **Camera 必须放进 `InteractiveScene`**（`CameraCfg` + `scene["camera"]`），由 `scene.reset()` 自动初始化——不要 standalone `Camera(...)` 后手动调 `_initialize_impl()`（会挂）。
+- 启动加 `--enable_cameras`；`CameraCfg` 的 spawn 用 `PinholeCameraCfg`；位姿用 `scene["camera"].set_world_poses_from_view(eyes, targets)` 对准目标；取图 `scene["camera"].data.output["rgb"][0,...,:3]`（H,W,3）→ imageio 存 PNG / `mimsave` 存 GIF。
+- **灯光坑（大）**：`DomeLightCfg(intensity=1.0)` 是默认亮度、画面正常；**往大了设（2000/6000/10000）画面反而全黑**（这个版本的物理单位/tone-mapping 与直觉相反）。别抄老教程里的 `intensity=2000`。
+- 机器人摆位：`scene["robot"].write_root_pose_to_sim(pose)` + `write_joint_state_to_sim(...)` + `scene.write_data_to_sim()` + `sim.step()` + `scene.update(dt)`，再 `camera.update(dt=0)` 取帧。
+- 纯几何俯视图（走廊/扫掠体积/地形 heightmap）直接用 matplotlib，不必上 Isaac Sim。
 
 ## 3. 训练
 
