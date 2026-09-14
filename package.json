@@ -11,6 +11,7 @@
   "files": [
     "lib",
     "skills",
+    "templates",
     "cordis.patch.yml"
   ],
   "keywords": [

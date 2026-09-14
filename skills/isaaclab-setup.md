@@ -90,13 +90,76 @@ from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, RslRlOnPolicyRunnerCfg
 
 **先算清任务物理上可不可行**，再谈训练。例如四足机器人 0.65×0.37 做 90° L 转弯，理论最小走廊宽 ≈ 1.4m；环境默认参数给 1.0m 宽的话，任何算法都学不会（必擦墙）。训练前用纯几何（`signed_clearance`）验证最小间隙。
 
-## 4. 远程服务器运维
+## 4. 环境生成 recipe（地形 + 观测/奖励模板 + 验证清单）
+
+生成一个高质量 RL 环境的固定流程：**地形 → 机器人 → 观测/奖励 → 验证**。地形生成器都在 `isaaclab.terrains` 下，分两类：
+
+- **height_field**（`isaaclab.terrains.height_field`）：先生成 2D 高度场数组，再转 mesh，适合粗糙地形。
+- **trimesh**（`isaaclab.terrains.trimesh`）：直接生成 mesh，适合结构化障碍（台阶/箱/坑/轨道/间隙）。
+
+### 4.1 地形生成 + headless 可视化的正确姿势
+
+坑：`trimesh.Scene.save_image()` 会调用 pyglet 的 `SceneViewer`，**headless 服务器上直接 `NoSuchDisplayException`**。正确做法是拿**原始 2D 高度场**用 matplotlib 画：
+
+```python
+from isaaclab.app import AppLauncher
+app = AppLauncher(headless=True).app            # 先起 app，再 import isaaclab
+
+import matplotlib; matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from isaaclab.terrains.height_field import hf_terrains, hf_terrains_cfg
+
+cfg = hf_terrains_cfg.HfPyramidStairsTerrainCfg(
+    size=(10.0, 10.0), horizontal_scale=0.1, vertical_scale=0.005,
+    border_width=0.5, step_height_range=(0.05, 0.15), step_width=0.3, platform_width=1.5)
+# cfg.function 被 @height_field_to_mesh 装饰过，返回 (meshes, origin)
+# 用 .__wrapped__ 拿原始函数 → 2D 离散高度场；× vertical_scale 才是米
+hf = hf_terrains.pyramid_stairs_terrain.__wrapped__(difficulty=1.0, cfg=cfg) * cfg.vertical_scale
+plt.imshow(hf.T, origin="lower", cmap="terrain"); plt.colorbar(label="height (m)"); plt.savefig("stairs.png")
+```
+
+### 4.2 可生成地形清单
+
+| 类别 | 类名 | 说明 |
+|---|---|---|
+| height_field | `HfRandomUniformTerrainCfg` | 随机起伏 |
+| height_field | `HfPyramidSlopedTerrainCfg` / `HfInvertedPyramidSlopedTerrainCfg` | 金字塔斜坡（上/下） |
+| height_field | `HfPyramidStairsTerrainCfg` / `HfInvertedPyramidStairsTerrainCfg` | 楼梯（上/下） |
+| height_field | `HfDiscreteObstaclesTerrainCfg` | 离散障碍 |
+| height_field | `HfWaveTerrainCfg` | 波浪 |
+| height_field | `HfSteppingStonesTerrainCfg` | 踏脚石（梅花桩） |
+| mesh | `MeshPlaneTerrainCfg` | 平面 |
+| mesh | `MeshPyramidStairsTerrainCfg` / `MeshInvertedPyramidStairsTerrainCfg` | 楼梯（上/下） |
+| mesh | `MeshRandomGridTerrainCfg` | 随机网格 |
+| mesh | `MeshRailsTerrainCfg` | 轨道 |
+| mesh | `MeshPitTerrainCfg` | 坑 |
+| mesh | `MeshBoxTerrainCfg` | 箱子 |
+| mesh | `MeshGapTerrainCfg` | 间隙 |
+| mesh | `MeshFloatingRingTerrainCfg` | 浮环 |
+| mesh | `MeshStarTerrainCfg` | 星形 |
+| mesh | `MeshRepeatedPyramids/Boxes/CylindersTerrainCfg` | 重复金字塔/箱/圆柱 |
+| 自定义 | 手动 `sim_utils.CuboidCfg` / `GroundPlaneCfg` | 走廊、任意墙段（如 MIRAGE 的 L 拐角） |
+
+### 4.3 四足行走观测/奖励/终止模板
+
+- **观测**：关节 pos/vel + 本体线/角速度（或 + 重力 + 高度扫描）+ 速度指令（command）。
+- **奖励**：速度跟踪 `exp(-err²/σ)` + 罚项（扭矩、关节加速度、碰撞、动作率、base 姿态/高度）。
+- **终止**：base/躯干触地、超时。
+- **奖励量级**：跟踪项 ±1~2、罚项 -0.01~-1，避免像"擦墙 -100"那种 2 个数量级的悬崖（会毁掉 DreamerV3，见 3.2/3.3）。
+
+### 4.4 验证清单（生成完必做）
+
+1. 地形：heightfield 先 matplotlib 可视化，确认几何对、z 范围合理。
+2. 机器人：spawn 后 `step()` 几帧，obs 无 NaN、reward 在预期量级、termination 按预期触发。
+3. 可行性：任务几何物理可解（3.3）。
+
+## 5. 远程服务器运维
 
 - 后台训练：`setsid nohup python train.py --headless < /dev/null > train.log 2>&1 &`，`disown` 分离。
 - **杀进程别用 `pkill -f train.py`**——`-f` 匹配整条命令行，会连你正在跑的 `bash -c "ssh ... pkill -f train.py ..."` 一起杀掉。用精确 pattern：`pkill -f 'python -u train.py'`，或 `ps aux | grep` 拿到 PID 再 `kill -9`。
 - 远程执行（paramiko）：SSH 通道会在 `setsid ... &` 后台进程持有 fd 时保持不关，表现为命令"超时"——进程其实已经起了，重新连一次确认即可，别误判成失败。
 
-## 5. 排错速查
+## 6. 排错速查
 
 | 症状 | 原因 / 解决 |
 |---|---|
@@ -108,7 +171,8 @@ from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, RslRlOnPolicyRunnerCfg
 | torch 警告 `sm_120 not compatible` | 显卡是 Blackwell，换 sm_89 的卡或降级需求 |
 | `omni.kit.viewport` 找不到 | headless kit 无 viewport，用 Camera 传感器 + `--enable_cameras` |
 | 训练 score 永远卡在最差值 | 先查任务几何是否物理不可行（见 3.3） |
+| `trimesh.Scene.save_image` 报 `NoSuchDisplayException` | headless 无 X 显示；改用 `.func.__wrapped__` 拿高度场 + matplotlib（见 4.1） |
 
-## 6. 一句话流程
+## 7. 一句话流程
 
-`查 GPU 架构 → 装 Isaac Sim 5.x + isaaclab 0.47.2 + rsl-rl-lib 3.0.1 → AppLauncher 先行 → DirectRLEnv(regex prim path) → 几何可行性先行 → 训练 → 无头渲染用 Camera`。
+`查 GPU 架构 → 装 Isaac Sim 5.x + isaaclab 0.47.2 + rsl-rl-lib 3.0.1 → AppLauncher 先行 → 环境生成(地形: height_field/mesh 见 4.2 → 观测/奖励模板 4.3 → 验证 4.4) → 训练 → 无头渲染用 Camera`。
