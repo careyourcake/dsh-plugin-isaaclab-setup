@@ -93,6 +93,28 @@ from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, RslRlOnPolicyRunnerCfg
 
 **先算清任务物理上可不可行**，再谈训练。例如四足机器人 0.65×0.37 做 90° L 转弯，理论最小走廊宽 ≈ 1.4m；环境默认参数给 1.0m 宽的话，任何算法都学不会（必擦墙）。训练前用纯几何（`signed_clearance`）验证最小间隙。
 
+### 3.4 训练真 policy + 官方视频录制（顶会视频的"骨"）
+
+**别拿运动学假走凑数——先训 policy，再用官方 RecordVideo 录。**
+
+```bash
+cd <IsaacLab>
+# 1) 训练（粗地形任务本身含楼梯/间隙/斜坡）
+python scripts/reinforcement_learning/rsl_rl/train.py \
+    --task Isaac-Velocity-Rough-Unitree-Go2-v0 --headless --max_iterations 600
+#    权重/日志 → logs/rsl_rl/<experiment>/<timestamp>/
+
+# 2) 用训好的权重录视频（--video 自动走 gym.wrappers.RecordVideo + render_mode="rgb_array"）
+python scripts/reinforcement_learning/rsl_rl/play.py \
+    --task Isaac-Velocity-Rough-Unitree-Go2-Play-v0 \
+    --video --video_length 200 --headless
+#    输出 → logs/rsl_rl/.../videos/play/*.mp4
+```
+
+Go2 任务 ID：`Isaac-Velocity-Flat-Unitree-Go2-v0`（平地）/ `Isaac-Velocity-Rough-Unitree-Go2-v0`（**粗地形，含楼梯/间隙**）+ 各自的 `-Play-v0`。
+
+要点：`--video` 自动配置 `render_mode="rgb_array"`，**不用自己搭相机**；`--video_length` 是**步数**不是秒；ETA：4096 环境 × 600 iteration ≈ 35–45 min（4090）。
+
 ## 4. 环境生成 recipe（地形 + 观测/奖励模板 + 验证清单）
 
 生成一个高质量 RL 环境的固定流程：**地形 → 机器人 → 观测/奖励 → 验证**。地形生成器都在 `isaaclab.terrains` 下，分两类：
@@ -274,6 +296,62 @@ def cam_follow(scene, robot_pos, yaw, shot, device):
 5. **跑通验证**：`python direct_rl_env.py --terrain stairs --headless --num-envs 4`，看 obs/reward 无 NaN、termination 正常。
 6. **渲染确认**：复制 `templates/render_scene.py`，`ZOO` 换楼梯，渲染 GIF 确认机器人站/走在楼梯上。
 7. 训练：包 `RslRlVecEnvWrapper` 接 PPO（见 3.1）。
+
+## 4.7 传感器配置（传感器也是 RL 环境的一部分）
+
+Isaac Lab 传感器都在 `isaaclab.sensors`。**挂载 = 给一个 prim_path + offset**，机器人本体传感器挂在 `{ENV_REGEX_NS}/Robot/<link>`。
+
+| 传感器 | Cfg 类 | 挂在哪（prim_path） | 输出 |
+|---|---|---|---|
+| **IMU** | `ImuCfg` | `{ENV_REGEX_NS}/Robot/base`（躯干） | `data.lin_acc_b` / `ang_vel_b` / `projected_gravity_b` |
+| **接触力** | `ContactSensorCfg` | `{ENV_REGEX_NS}/Robot/.*_foot`（只脚）或 `.*`（全身） | `data.net_forces_w_history`、`air_time` |
+| **RGB/深度相机** | `CameraCfg` / `TiledCameraCfg` | `{ENV_REGEX_NS}/Robot/base/front_cam` | `data.output["rgb"/"distance_to_image_plane"]` |
+| **高度扫描**（地形感知） | `RayCasterCfg` + `GridPatternCfg` | `{ENV_REGEX_NS}/Robot/base`，offset 在 **上方 20m** | `data.ray_hits_w`（高度网格） |
+| **雷达/点云** | `RayCasterCfg` + `LidarPatternCfg`/`BpearlPatternCfg` | `{ENV_REGEX_NS}/Robot/base` | 点云 |
+| **坐标系变换** | `FrameTransformerCfg` | 任意两个 prim | 相对位姿 |
+
+**照抄标准 rough env 的传感器挂法**（权威写法）：
+
+```python
+from isaaclab.sensors import RayCasterCfg, ContactSensorCfg, ImuCfg, CameraCfg
+from isaaclab.sensors.ray_caster import patterns
+
+@configclass
+class SceneCfg(InteractiveSceneCfg):
+    # 高度扫描：从机器狗 base 上方 20m 往下打 1.6x1.0m 网格射线，打向地形 mesh
+    height_scanner = RayCasterCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/base",
+        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
+        ray_alignment="yaw",                                   # 射线随机器狗 yaw 转
+        pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[1.6, 1.0]),
+        mesh_prim_paths=["/World/ground"],                     # 必须指定打向谁
+        debug_vis=False,
+    )
+    # 接触力（脚 + 全身），track_air_time 用于步态奖励
+    contact_forces = ContactSensorCfg(prim_path="{ENV_REGEX_NS}/Robot/.*",
+                                      history_length=3, track_air_time=True)
+    # IMU 挂躯干
+    imu = ImuCfg(prim_path="{ENV_REGEX_NS}/Robot/base")
+    # 前视深度相机
+    camera = CameraCfg(prim_path="{ENV_REGEX_NS}/Robot/base/front_cam", height=480, width=640,
+                       data_types=["rgb", "distance_to_image_plane"], spawn=sim_utils.PinholeCameraCfg(...),
+                       offset=CameraCfg.OffsetCfg(pos=(0.4, 0.0, 0.05), rot=(0.5,-0.5,0.5,-0.5), convention="ros"))
+```
+
+读取：
+```python
+scene["imu"].data.lin_acc_b, scene["imu"].data.ang_vel_b, scene["imu"].data.projected_gravity_b
+scene["contact_forces"].data.net_forces_w_history          # (N, history, num_bodies, 3)
+scene["height_scanner"].data.ray_hits_w                    # (N, num_rays, 3)
+scene["camera"].data.output["rgb"]                          # (N, H, W, 4)
+```
+
+**传感器坑**：
+- 传感器必须**挂进场景**（`InteractiveScene` 的 SceneCfg 字段，或 `scene.sensors["x"] = ...`），否则读不到 data。
+- **Camera 要 `--enable_cameras`**；`RayCaster` 必须给 `mesh_prim_paths`（打向哪个 mesh），否则打不中。
+- **高度扫描的 `offset.pos.z=20` 是"从上方 20m 往下打射线"，不是传感器装在 20m 高**——别理解反。
+- 接触传感器 prim 用 `.*_foot` 只取脚（步态奖励常用），`.*` 取全身（摔倒判定常用）。
+- 传感器有 `update_period`：设 0 = 每步更新（最准最慢），大一点省算力。
 
 ## 5. 远程服务器运维
 
