@@ -147,18 +147,58 @@ plt.imshow(hf.T, origin="lower", cmap="terrain"); plt.colorbar(label="height (m)
 | mesh | `MeshRepeatedPyramids/Boxes/CylindersTerrainCfg` | 重复金字塔/箱/圆柱 |
 | 自定义 | 手动 `sim_utils.CuboidCfg` / `GroundPlaneCfg` | 走廊、任意墙段（如 MIRAGE 的 L 拐角） |
 
-### 4.3 四足行走观测/奖励/终止模板
+### 4.3 完整环境模板（复制即用）
 
-- **观测**：关节 pos/vel + 本体线/角速度（或 + 重力 + 高度扫描）+ 速度指令（command）。
-- **奖励**：速度跟踪 `exp(-err²/σ)` + 罚项（扭矩、关节加速度、碰撞、动作率、base 姿态/高度）。
-- **终止**：base/躯干触地、超时。
-- **奖励量级**：跟踪项 ±1~2、罚项 -0.01~-1，避免像"擦墙 -100"那种 2 个数量级的悬崖（会毁掉 DreamerV3，见 3.2/3.3）。
+**不要从零手写 env**——直接用模板 `templates/direct_rl_env.py`（Go2 + 可配置地形 + 完整观测/奖励/终止，可直接训）。改 `TERRAIN_ZOO` 里选哪种地形、改 `_get_rewards` 加奖励项即可。
 
-### 4.4 验证清单（生成完必做）
+模板里的观测/奖励标准做法（四足速度跟踪任务）：
 
-1. 地形：heightfield 先 matplotlib 可视化，确认几何对、z 范围合理。
-2. 机器人：spawn 后 `step()` 几帧，obs 无 NaN、reward 在预期量级、termination 按预期触发。
-3. 可行性：任务几何物理可解（3.3）。
+| 项 | 内容 |
+|---|---|
+| 观测 (34维) | base 线速度(3) + 角速度(3) + 投影重力(3) + 关节位置偏差(12) + 关节速度(12) + 速度指令(1) |
+| 奖励 | 速度跟踪 `exp(-(vx-cmd)²/0.25)` ×1.5；罚：角速度²、关节速度²、动作率²、非竖直姿态、base 接触 |
+| 终止 | base 接触(摔倒) / 超时 |
+| 重置 | 随机速度指令 + 默认站姿 |
+
+**奖励量级铁律**：跟踪项 ±1~2、罚项 -0.01~-1。**避免像「擦墙 -100」那种跨 2 个数量级的悬崖**（会毁掉 DreamerV3，见 3.2/3.3）。
+
+关键 API（模板已用）：
+- `self.robot.data.root_lin_vel_b / root_ang_vel_b / projected_gravity_b / joint_pos / joint_vel`
+- `self.robot.set_joint_position_target(...)`（PD 保持）
+- `self.contact_sensor.data.net_forces_w_history[:,-1]...`（接触判定）
+
+### 4.4 3D 渲染 + 可视化（截图/视频/GIF）
+
+**用模板 `templates/render_scene.py`**（地形 + Go2 + 第三视角 RGB + 右下角 Depth Image 内嵌 + 步态动画 → GIF）。要点：
+
+1. **Camera 走 `InteractiveScene`**（`CameraCfg` + `scene["camera"]`），加 `--enable_cameras`。
+2. **灯光**：`DomeLightCfg(intensity=1.0)`（正常）+ `DistantLightCfg(intensity=8, rot=(0.87,0,0.5,0))`（主光源，出方向阴影）。
+3. **深坑/间隙**：地形下方加一块暗色地板（z=-2），否则 gap 透出背景显白。
+4. **深度相机**：`data_types=["distance_to_image_plane"]`，输出 `(H,W,1)` → **`reshape(H,W)`** 才能 `Image.fromarray`。
+5. **内嵌小图**：深度归一化（近白远黑）→ resize → `PIL` 贴到右下角 + 白底 + "Depth Image" 标题。
+6. **机器人摆位**：`write_root_pose_to_sim` + `set_joint_position_target(default)` + `scene.write_data_to_sim()` + `sim.step()` + `scene.update(dt)`。
+7. **摆位索引坑**：`default_joint_pos` 是 `(num_envs, num_joints)`，改关节要写 `target[0, idx]`，不是 `target[idx]`。
+8. **步态动画**：对角小跑（FL/RR 同相、FR/RL 反相），大腿 `default + 0.5*sin(2πft+phase)`、小腿 `default - 0.35*max(0,cos(...))`，base 沿 +x 平移。
+9. 多机位一次渲染对比（`cams` 列表循环），挑最好的角度，别一次只试一个。
+
+### 4.5 验证清单（生成完必做）
+
+1. 地形：heightfield 先 matplotlib 可视化，确认几何对、z 范围合理（mesh 地形看解析式高度图）。
+2. 机器人：spawn 后 `step()` 几帧，**obs 无 NaN、reward 在预期量级、termination 按预期触发**（`torch.isnan(obs).any()`）。
+3. 渲染：渲一帧确认机器人可见、相机框正、灯光正常（别全黑）。
+4. 可行性：任务几何物理可解（3.3）。
+
+### 4.6 工作流：需求 → 环境（照这个走）
+
+> 例：用户说"生成一个楼梯环境"。
+
+1. **选地形**：查 4.2 清单 → 楼梯选 `MeshPyramidStairsTerrainCfg`（mesh，物理用三角网格不会卡缝）或 `HfPyramidStairsTerrainCfg`。
+2. **配参数**：步高 `step_height_range`、步宽 `step_width`、平台 `platform_width`。**注意 `MeshGapTerrainCfg` 等 mesh 地形不接受 `border_width`**（只有部分接受）。
+3. **验证几何**：先 4.1 出 heightmap 图，确认台阶数/高度合理。
+4. **建环境**：复制 `templates/direct_rl_env.py`，`TERRAIN_ZOO` 换成楼梯配置。
+5. **跑通验证**：`python direct_rl_env.py --terrain stairs --headless --num-envs 4`，看 obs/reward 无 NaN、termination 正常。
+6. **渲染确认**：复制 `templates/render_scene.py`，`ZOO` 换楼梯，渲染 GIF 确认机器人站/走在楼梯上。
+7. 训练：包 `RslRlVecEnvWrapper` 接 PPO（见 3.1）。
 
 ## 5. 远程服务器运维
 
@@ -179,7 +219,17 @@ plt.imshow(hf.T, origin="lower", cmap="terrain"); plt.colorbar(label="height (m)
 | `omni.kit.viewport` 找不到 | headless kit 无 viewport，用 Camera 传感器 + `--enable_cameras` |
 | 训练 score 永远卡在最差值 | 先查任务几何是否物理不可行（见 3.3） |
 | `trimesh.Scene.save_image` 报 `NoSuchDisplayException` | headless 无 X 显示；改用 `.func.__wrapped__` 拿高度场 + matplotlib（见 4.1） |
+| 渲染全黑（mean<40） | `DomeLightCfg(intensity=...)` 设太大（2000+）；改回 **1.0**（见 2.4） |
+| `MeshXxxTerrainCfg.__init__() got an unexpected keyword argument 'border_width'` | 部分 mesh 地形（如 `MeshGapTerrainCfg`）没有 `border_width` 字段，删掉该参数；border 由 `TerrainGeneratorCfg.border_width` 控制 |
+| 深度图合成报 `Cannot handle this data type: (1,1,1,3)` | 深度输出是 `(H,W,1)`，先 `reshape(H,W)` 再 `Image.fromarray`（见 4.4） |
+| 改关节 `target[idx]` 报 index out of bounds | `default_joint_pos` 是 `(num_envs, num_joints)`，写 `target[0, idx]`（见 4.4） |
+| 机器人一 spawn 就瘫倒 | 没做 PD 保持；每步 `set_joint_position_target(default_joint_pos)`（见 4.3/4.4） |
+| standalone `Camera` 挂住 | Camera 必须进 `InteractiveScene`（见 2.4） |
 
 ## 7. 一句话流程
 
-`查 GPU 架构 → 装 Isaac Sim 5.x + isaaclab 0.47.2 + rsl-rl-lib 3.0.1 → AppLauncher 先行 → 环境生成(地形: height_field/mesh 见 4.2 → 观测/奖励模板 4.3 → 验证 4.4) → 训练 → 无头渲染用 Camera`。
+`查 GPU 架构 → 装 Isaac Sim 5.x + isaaclab 0.47.2 + rsl-rl-lib 3.0.1 → AppLauncher 先行 → 环境生成(需求→环境走 4.6 七步：选地形 4.2 → 配参 → heightmap 验证 4.1 → 复制 env 模板 4.3 → 跑通验证 4.5 → 渲染确认 4.4) → 训练 3 → 运维 5`。
+
+**两个模板**（`templates/` 下直接复制改）：
+- `direct_rl_env.py`：完整 DirectRLEnv（地形+Go2+观测/奖励/终止，可训）。
+- `render_scene.py`：3D 渲染（地形+机器人+深度内嵌+步态 GIF）。
