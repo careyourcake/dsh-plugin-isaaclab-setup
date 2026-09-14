@@ -109,13 +109,6 @@ def main():
     scene = InteractiveScene(SceneCfg(num_envs=1, env_spacing=2.0))
     sim.reset()
 
-    scene["camera"].set_world_poses_from_view(
-        torch.tensor([[0.1, 2.2, 1.55]], device=args.device),
-        torch.tensor([[0.1, -0.3, 0.05]], device=args.device))
-    scene["depth_cam"].set_world_poses_from_view(
-        torch.tensor([[0.2, 1.2, 3.2]], device=args.device),
-        torch.tensor([[0.2, -0.4, 0.0]], device=args.device))
-
     names = list(scene["robot"].joint_names)
     idx = {n: i for i, n in enumerate(names)}
     default = scene["robot"].data.default_joint_pos.clone()
@@ -123,7 +116,28 @@ def main():
     calf = {L: idx[f"{L}_calf_joint"] for L in ["FL", "FR", "RL", "RR"]}
     phase = {"FL": 0.0, "RR": 0.0, "FR": math.pi, "RL": math.pi}
 
-    dt, freq, speed = 0.005, 1.6, 1.1
+    dt = 0.005
+    # 关键：机器狗 z 不能写死——不同地形平台高度不同（楼梯平台高、gap 平台为 0）。
+    # 先高抛到地面上方，PD 保持站姿让它自然落到地形上，再读实际站立高度。
+    scene["robot"].write_root_pose_to_sim(
+        torch.tensor([[0.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0]], device=args.device))
+    for _ in range(400):
+        scene["robot"].set_joint_position_target(default)
+        scene.write_data_to_sim()
+        sim.step()
+        scene.update(dt)
+    z_stand = float(scene["robot"].data.root_pos_w[0, 2]) + 0.06
+    print(f"settled standing height z={z_stand:.3f}", flush=True)
+
+    # 相机相对实际站高来定（地形平台多高，相机就抬多高，否则机器狗跑出画面）
+    scene["camera"].set_world_poses_from_view(
+        torch.tensor([[0.1, 2.2, z_stand + 1.25]], device=args.device),
+        torch.tensor([[0.1, -0.3, z_stand - 0.25]], device=args.device))
+    scene["depth_cam"].set_world_poses_from_view(
+        torch.tensor([[0.2, 1.2, z_stand + 2.9]], device=args.device),
+        torch.tensor([[0.2, -0.4, z_stand - 0.3]], device=args.device))
+
+    freq, speed = 1.6, 1.1
     x_base, frames = -0.35, []
     for f in range(args.steps):
         t = f * dt
@@ -132,7 +146,7 @@ def main():
             target[0, thigh[L]] = default[0, thigh[L]] + 0.5 * math.sin(2 * math.pi * freq * t + phase[L])
             target[0, calf[L]] = default[0, calf[L]] - 0.35 * max(0.0, math.cos(2 * math.pi * freq * t + phase[L]))
         x_base += speed * dt
-        pos = torch.tensor([[x_base, 0.0, 0.36]], device=args.device)
+        pos = torch.tensor([[x_base, 0.0, z_stand]], device=args.device)
         quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=args.device)
         scene["robot"].write_root_pose_to_sim(torch.cat([pos, quat], dim=-1))
         scene["robot"].set_joint_position_target(target)

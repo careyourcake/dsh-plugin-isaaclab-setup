@@ -177,6 +177,7 @@ plt.imshow(hf.T, origin="lower", cmap="terrain"); plt.colorbar(label="height (m)
 4. **深度相机**：`data_types=["distance_to_image_plane"]`，输出 `(H,W,1)` → **`reshape(H,W)`** 才能 `Image.fromarray`。
 5. **内嵌小图**：深度归一化（近白远黑）→ resize → `PIL` 贴到右下角 + 白底 + "Depth Image" 标题。
 6. **机器人摆位**：`write_root_pose_to_sim` + `set_joint_position_target(default)` + `scene.write_data_to_sim()` + `sim.step()` + `scene.update(dt)`。
+   - **绝对不要写死 base 的 z**：不同地形平台高度不同（楼梯平台高、gap 平台≈0）。先高抛到 z=2.0，PD 保持站姿跑 ~400 步让它自然落到地形上，**读实际 `root_pos_w[0,2]` 当站立高度**，相机也跟着这个高度来定，否则机器狗会埋进地形或跑出画面。
 7. **摆位索引坑**：`default_joint_pos` 是 `(num_envs, num_joints)`，改关节要写 `target[0, idx]`，不是 `target[idx]`。
 8. **步态动画**：对角小跑（FL/RR 同相、FR/RL 反相），大腿 `default + 0.5*sin(2πft+phase)`、小腿 `default - 0.35*max(0,cos(...))`，base 沿 +x 平移。
 9. 多机位一次渲染对比（`cams` 列表循环），挑最好的角度，别一次只试一个。
@@ -225,6 +226,8 @@ plt.imshow(hf.T, origin="lower", cmap="terrain"); plt.colorbar(label="height (m)
 | 改关节 `target[idx]` 报 index out of bounds | `default_joint_pos` 是 `(num_envs, num_joints)`，写 `target[0, idx]`（见 4.4） |
 | 机器人一 spawn 就瘫倒 | 没做 PD 保持；每步 `set_joint_position_target(default_joint_pos)`（见 4.3/4.4） |
 | standalone `Camera` 挂住 | Camera 必须进 `InteractiveScene`（见 2.4） |
+| DirectRLEnv 里 prim path 报 `is not global` | 用了 `{ENV_REGEX_NS}`（ManagerBased 占位符）；DirectRLEnv 要用 `/World/envs/env_.*/Robot`（见 2.2/4.3） |
+| 渲染时机器狗埋进地形/跑出画面 | base z 写死了；先 settle 读实际站高，相机也按站高定（见 4.4） |
 
 ## 7. 一句话流程
 

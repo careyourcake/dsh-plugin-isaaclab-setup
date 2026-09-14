@@ -137,7 +137,8 @@ class Go2TerrainEnv(DirectRLEnv):
 
 
 # 地形 + 机器人 + 接触传感器配置（挂在 env cfg 上）
-Go2TerrainEnvCfg.robot = UNITREE_GO2_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+# 注意：DirectRLEnv 用**全局 regex** prim path，`{ENV_REGEX_NS}` 是 ManagerBased 占位符、这里会报错
+Go2TerrainEnvCfg.robot = UNITREE_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 Go2TerrainEnvCfg.terrain = TerrainImporterCfg(
     prim_path="/World/ground",
     terrain_type="generator",
@@ -149,7 +150,7 @@ Go2TerrainEnvCfg.terrain = TerrainImporterCfg(
     visual_material=None, debug_vis=False,
 )
 Go2TerrainEnvCfg.contact_sensor = ContactSensorCfg(
-    prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, update_period=0.0, track_air_time=False,
+    prim_path="/World/envs/env_.*/Robot/.*", history_length=3, update_period=0.0, track_air_time=False,
 )
 
 
